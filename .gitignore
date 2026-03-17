@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+
+# 虚拟环境
+venv/
+env/
+.venv/
+
+# 日志
+log/
+*.log
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 训练结果/模型权重
+train/result/
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# 测试结果
+test/result/
+
+# 环境变量
+.env
+*.env
+
+# Jupyter
+.ipynb_checkpoints/

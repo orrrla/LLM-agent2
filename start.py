@@ -4,6 +4,7 @@ import os
 import copy
 import traceback
 import time
+import re
 import redis
 import requests
 from collections import OrderedDict
@@ -30,6 +31,8 @@ socketio.init_app(app)
 
 TTL = 40
 REDIS_KEY = "voice:last_service:{}"
+DISAMBIG_KEY = "voice:disambiguation:{}"
+DISAMBIG_TTL = 120
 redis_client = RedisClient() 
 thread_pool = ThreadPoolExecutor(max_workers=10)
 
@@ -107,6 +110,75 @@ def handle_chat(handler_bot, nlu_result, query, sender_id, begin):
         return False, full_answer
 
 
+def clear_disambiguation_state(sender_id):
+    redis_client.set(DISAMBIG_KEY.format(sender_id), "", ex=1)
+
+
+def parse_user_selection(query, candidates):
+    text = (query or "").strip()
+    if not text or not candidates:
+        return None
+
+    index_patterns = [
+        r"^第?\s*(\d+)\s*(个|项|条)?$",
+        r"^(\d+)$"
+    ]
+    selected_index = None
+    for pattern in index_patterns:
+        match_obj = re.match(pattern, text)
+        if match_obj:
+            selected_index = int(match_obj.group(1)) - 1
+            break
+    if selected_index is not None and 0 <= selected_index < len(candidates):
+        return candidates[selected_index]
+
+    normalized = text.replace(" ", "").lower()
+    for item in candidates:
+        keys = [
+            str(item.get("display_name", "")).replace(" ", "").lower(),
+            str(item.get("intent", "")).replace(" ", "").lower(),
+            str(item.get("function", "")).replace(" ", "").lower()
+        ]
+        for key in keys:
+            if not key:
+                continue
+            if normalized == key or normalized in key or key in normalized:
+                return item
+    return None
+
+
+def build_disambiguation_nlg(candidates):
+    lines = [prompts.DISAMBIGUATION_PROMPT]
+    for idx, item in enumerate(candidates, start=1):
+        name = item.get("display_name", "") or item.get("intent", "")
+        score = item.get("score", 0)
+        try:
+            score_text = f"{float(score):.2f}"
+        except Exception:
+            score_text = str(score)
+        lines.append(f"{idx}. {name} (置信度:{score_text})")
+    return "\n".join(lines)
+
+
+def emit_disambiguation_response(template, query, trace_id, candidates, begin, message=None):
+    result = copy.deepcopy(template)
+    result["query"] = query
+    result["tarce_id"] = trace_id
+    result["intent"] = "候选确认"
+    result["intent_id"] = ""
+    result["function"] = "Disambiguation"
+    result["slots"] = {}
+    result["needs_disambiguation"] = True
+    result["candidates"] = candidates
+    result["nlg"] = message or build_disambiguation_nlg(candidates)
+    result["cost"] = time.time() - begin
+    emit(
+        "request_nlu",
+        json.dumps(result, ensure_ascii=False),
+        broadcast=False
+    )
+
+
 
 @socketio.on('request_nlu')
 def inference(req):
@@ -131,16 +203,51 @@ def inference(req):
         logger.session.trace_id = trace_id
         logger.info("Request Params: {}".format(json_info))
 
+        disamb_raw = redis_client.get(DISAMBIG_KEY.format(sender_id))
+        forced_intent_id = None
+        disamb_origin_query = ""
+        if disamb_raw:
+            try:
+                disamb_state = json.loads(disamb_raw)
+            except Exception:
+                disamb_state = {}
+            disamb_candidates = disamb_state.get("candidates", [])
+            if not disamb_candidates:
+                clear_disambiguation_state(sender_id)
+                disamb_state = {}
+                disamb_candidates = []
+            disamb_origin_query = disamb_state.get("origin_query", "")
+            selected = parse_user_selection(ori_query, disamb_candidates)
+            if selected:
+                forced_intent_id = str(selected.get("intent_id", ""))
+                if not forced_intent_id:
+                    forced_intent_id = None
+                clear_disambiguation_state(sender_id)
+                logger.info(f"TraceID:{trace_id}, disambiguation selected: {selected}")
+            else:
+                emit_disambiguation_response(
+                    nlu_template,
+                    ori_query,
+                    trace_id,
+                    disamb_candidates,
+                    begin,
+                    message=prompts.DISAMBIGUATION_RETRY_PROMPT
+                )
+                return
+
         last_info = redis_client.get(REDIS_KEY.format(sender_id))
         last_domain, last_query, last_reject, last_answer = "", "", "", ""
         if last_info:
             last_domain, last_query, last_reject, last_answer = last_info.split("#")
 
         # Query改写
-        query = request_rewrite(query, last_answer, sender_id)
+        if forced_intent_id and disamb_origin_query:
+            query = disamb_origin_query
+        else:
+            query = request_rewrite(query, last_answer, sender_id)
 
         # 调用nlu语义
-        handler_nlu = thread_pool.submit(request_nlu, query, trace_id, enable_dm)
+        handler_nlu = thread_pool.submit(request_nlu, query, trace_id, enable_dm, forced_intent_id)
 
         # 调用仲裁
         handler_arbitration = thread_pool.submit(request_arbitration, ori_query, sender_id)
@@ -156,6 +263,8 @@ def inference(req):
 
         # 获取仲裁结果
         arbitration_result = handler_arbitration.result()
+        if forced_intent_id:
+            arbitration_result = "task"
 
         logger.info(
             f"TraceID:{trace_id}, query:{query}, arbitration result: {arbitration_result}, cost time: {time.time() - begin}")
@@ -163,8 +272,29 @@ def inference(req):
         # 开始仲裁
         if arbitration_result == "task":
             nlu_result = handler_nlu.result()
+            if nlu_result.get("needs_disambiguation", False):
+                disamb_state = {
+                    "origin_query": ori_query,
+                    "candidates": nlu_result.get("candidates", [])
+                }
+                redis_client.set(
+                    DISAMBIG_KEY.format(sender_id),
+                    json.dumps(disamb_state, ensure_ascii=False),
+                    ex=DISAMBIG_TTL
+                )
+                nlu_result["nlg"] = build_disambiguation_nlg(nlu_result.get("candidates", []))
+                emit(
+                    "request_nlu",
+                    json.dumps(
+                        nlu_result,
+                        ensure_ascii=False
+                    ),
+                    broadcast=False
+                )
+                return
             # 技能
             if nlu_result.get("function", "") not in ["Unknown"]:
+                clear_disambiguation_state(sender_id)
                 redis_client.set(REDIS_KEY.format(sender_id), f"SKILL#{query}#1#", ex=TTL)
                 emit(
                     "request_nlu",

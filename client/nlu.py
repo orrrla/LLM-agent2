@@ -10,15 +10,18 @@ from typing import List
 NLU_URL = os.environ["NLU_URL"]
 
 
-def request_nlu(query, trace_id, enable_dm=True):
+def request_nlu(query, trace_id, enable_dm=True, force_intent_id=None):
     headers = {
         "Content-Type":"application/json"
     }
-    payload = json.dumps({
+    payload_dict = {
         "query": query,
         "trace_id": trace_id,
         "enable_dm": enable_dm
-    })
+    }
+    if force_intent_id:
+        payload_dict["force_intent_id"] = str(force_intent_id)
+    payload = json.dumps(payload_dict)
     try:
         response = requests.post(
             NLU_URL,

@@ -141,4 +141,6 @@ BOT_CHAT_SYSTEM_PROMPT = """你是一位AI智能座舱助手，由小米汽车AI
 NLU_SYSTEM_PROMPT = "今年是2025年。你需要根据输入去匹配最合适的function。如果输入里未指明需要操作的部件，请不要匹配到任何对部件进行操作的函数，部件包括但不限于空调、系统设置、车窗等。请必须匹配到Unknown函数。比如，将”打开这个“匹配到Unknown。请记住解锁和打开意思相近。"
 
 DEFAULT_NLG = "抱歉，这个问题我还在学习中"
+DISAMBIGUATION_PROMPT = "我理解到你可能想使用以下功能，请回复序号或功能名称进行确认："
+DISAMBIGUATION_RETRY_PROMPT = "还没识别到你的选择，请回复候选序号（如1）或候选功能名称。"
 

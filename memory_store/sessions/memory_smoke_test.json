@@ -1,0 +1,29 @@
+{
+  "id": "memory_smoke_test",
+  "title": "memory_smoke_test",
+  "created_at": 1775920665.329222,
+  "updated_at": 1775920665.3294752,
+  "messages": [
+    {
+      "role": "user",
+      "content": "导航去上海迪士尼",
+      "created_at": 1775920665.3293371,
+      "metadata": {
+        "query": "导航去上海迪士尼"
+      }
+    },
+    {
+      "role": "assistant",
+      "content": "好的，正在为你规划去上海迪士尼的路线",
+      "created_at": 1775920665.329474,
+      "metadata": {
+        "route": "task",
+        "intent": "导航",
+        "function": "maps_text_search",
+        "slots": {
+          "destination": "上海迪士尼"
+        }
+      }
+    }
+  ]
+}

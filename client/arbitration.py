@@ -4,6 +4,8 @@ import json
 import os
 import requests
 import prompts
+from config.runtime import get_app_settings, get_model_settings
+from memory_module_v2.api import build_memory_context
 from utils import logger
 from utils.redis_tool import RedisClient
 
@@ -17,17 +19,22 @@ REDIS_KEY = "voice:arbitration_history:"
 _redis_client = RedisClient() 
 
 
-API_KEY = os.environ["API_KEY"]
-DOUBAO_URL = os.environ["BASE_URL"]
 SYSTEM_PROMPT = prompts.ARBITRAION_SYSTEM_PROMPT
 
 
-def request_arbitration(query, sender_id):
+def request_arbitration(query, sender_id, session_id=None):
+    settings = get_app_settings()
+    models = get_model_settings()
+    session_id = session_id or sender_id
     headers = {
         "Content-Type": "application/json",
-        "Authorization": API_KEY
+        "Authorization": settings.api_key
     }
-    message = [{"role": "system", "content": SYSTEM_PROMPT}]
+    memory_context = build_memory_context(query, session_id)
+    system_prompt = SYSTEM_PROMPT
+    if memory_context:
+        system_prompt = SYSTEM_PROMPT + "\n\n# 长期记忆\n" + memory_context
+    message = [{"role": "system", "content": system_prompt}]
 
     try:
         start_time = time.time()
@@ -42,14 +49,14 @@ def request_arbitration(query, sender_id):
         message.extend(history)
 
         body = dict(
-            model="ep-20250122160643-vj459",
+            model=models.arbitration_model,
             messages=message,
             max_tokens=MAX_TOKEN,
             temperature=0,
             stream=True
         )
         response = requests.post(
-            DOUBAO_URL,
+            settings.base_url,
             headers=headers,
             json=body,
             stream=True,

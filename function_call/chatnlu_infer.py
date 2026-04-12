@@ -8,7 +8,10 @@ import requests
 import base64
 import time
 import uvicorn
+from pathlib import Path
 import prompts
+from config.runtime import get_app_settings, get_model_settings
+from memory_module_v2.api import build_memory_context
 from slot_process import intent_slot
 from function import tools1
 from fastapi import FastAPI, Request
@@ -22,9 +25,6 @@ app = FastAPI()
 
 MAX_CONF = 0.98
 TIMEOUT = 5
-INTENT_URL = os.environ["INTENT_URL"]
-DOUBAO_API_KEY = os.environ["API_KEY"]
-DOUBAO_URL = os.environ["BASE_URL"]
 DISAMBIG_TOP1_MIN = float(os.getenv("DISAMBIG_TOP1_MIN", "0.70"))
 DISAMBIG_MARGIN_MIN = float(os.getenv("DISAMBIG_MARGIN_MIN", "0.08"))
 DISAMBIG_TOPK = int(os.getenv("DISAMBIG_TOPK", "3"))
@@ -33,7 +33,8 @@ DISAMBIG_TOPK = int(os.getenv("DISAMBIG_TOPK", "3"))
 id2func = {}
 func2name = {}
 name2id = {}
-with open("../config/class.txt", 'r', encoding='utf-8') as mapfile:
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
+with (CONFIG_DIR / "class.txt").open('r', encoding='utf-8') as mapfile:
     for line in mapfile:
         id, name, func = line.strip().split(":")
         id2func[id] = func
@@ -41,7 +42,7 @@ with open("../config/class.txt", 'r', encoding='utf-8') as mapfile:
         name2id[name] = id
 
 tool_map = {}
-with open("../config/slot_intent.json", "r", encoding="utf-8") as slotfile:
+with (CONFIG_DIR / "slot_intent.json").open("r", encoding="utf-8") as slotfile:
     slot_map = json.load(slotfile)
     for item in tools1:
         name = item["function"]["name"]
@@ -54,12 +55,14 @@ with open("../config/slot_intent.json", "r", encoding="utf-8") as slotfile:
 
 
 def send_messages(messages, tool_lst):
+    settings = get_app_settings()
+    models = get_model_settings()
     headers = {
-        "Authorization": DOUBAO_API_KEY,
+        "Authorization": settings.api_key,
         "Content-Type": "application/json"
     }
     data = {
-        "model": "ep-20250106153928-kh8t7",
+        "model": models.nlu_fc_model,
         "messages": messages,
         "tools": tool_lst,
         "temperature": 1e-6,
@@ -67,7 +70,7 @@ def send_messages(messages, tool_lst):
     }
     try:
         response = requests.post(
-            DOUBAO_URL,
+            settings.base_url,
             headers=headers,
             data=json.dumps(data),
             timeout=TIMEOUT
@@ -81,9 +84,10 @@ def send_messages(messages, tool_lst):
 
 
 def intent_recall(query, trace_id):
+    settings = get_app_settings()
     headers = {'Content-Type': 'application/json'}
     data = {"query": query, "trace_id": str(uuid.uuid1())}
-    response = requests.post(url=INTENT_URL, headers=headers, data=json.dumps(data))
+    response = requests.post(url=settings.intent_url, headers=headers, data=json.dumps(data))
     return response.json()
 
 
@@ -148,9 +152,14 @@ def should_disambiguate(intent_rec, candidates):
     return False
 
 
-def run_fc(query, now_tool):
+def run_fc(query, now_tool, session_id=None):
     header = [{"role": "system", "content": prompts.NLU_SYSTEM_PROMPT}]
-    context = [{"role": "user", "content": query}]
+    user_content = query
+    if session_id:
+        memory_context = build_memory_context(query, session_id)
+        if memory_context:
+            user_content = f"{memory_context}\n\n# 当前用户输入\n{query}"
+    context = [{"role": "user", "content": user_content}]
     messages = header + context
     start_time = time.time()
     result = send_messages(messages, now_tool)
@@ -161,7 +170,7 @@ def run_fc(query, now_tool):
     return intent_slot(result, func2name, slot_map)
 
 
-def predict(query, trace_id, force_intent_id=None):
+def predict(query, trace_id, force_intent_id=None, session_id=None):
     try:
         if force_intent_id:
             force_intent_id = str(force_intent_id)
@@ -173,7 +182,7 @@ def predict(query, trace_id, force_intent_id=None):
                     "candidates": []
                 }
             now_tool = tool_map.get(forced_func, [])
-            nlu = run_fc(query, now_tool) if now_tool else f"{func2name.get(forced_func, '未知')}-无"
+            nlu = run_fc(query, now_tool, session_id=session_id) if now_tool else f"{func2name.get(forced_func, '未知')}-无"
             return {
                 "nlu": nlu,
                 "needs_disambiguation": False,
@@ -210,7 +219,7 @@ def predict(query, trace_id, force_intent_id=None):
             else:
                 continue
 
-        nlu = run_fc(query, now_tool)
+        nlu = run_fc(query, now_tool, session_id=session_id)
     except Exception:
         return {
             "nlu": "未知-无",
@@ -236,9 +245,10 @@ async def inference(request: Request):
     enable_dm = json_info.get("enable_dm", True)
     trace_id = json_info.get("trace_id", "1")
     force_intent_id = json_info.get("force_intent_id")
+    session_id = json_info.get("session_id")
 
     # 抽取意图和槽位
-    predict_result = predict(query, trace_id, force_intent_id=force_intent_id)
+    predict_result = predict(query, trace_id, force_intent_id=force_intent_id, session_id=session_id)
     nlu = predict_result.get("nlu", "未知-无")
     needs_disambiguation = predict_result.get("needs_disambiguation", False)
     candidates = predict_result.get("candidates", [])

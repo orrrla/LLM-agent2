@@ -273,3 +273,7 @@ yarl==1.20.0
 zipp==3.21.0
 zope.event==5.0
 zope.interface==7.2
+jieba
+psycopg[binary]
+rank-bm25
+html2text

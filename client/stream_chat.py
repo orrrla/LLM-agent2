@@ -5,6 +5,7 @@ import re
 import time
 import requests
 import prompts
+from config.runtime import get_app_settings, get_model_settings
 from utils import logger
 from utils.redis_tool import RedisClient
 
@@ -16,12 +17,12 @@ REDIS_KEY = "voice:chat_history:{}"
 _redis_client = RedisClient() 
 
 
-DOUBAO_API_KEY = os.environ["API_KEY"]
-DOUBAO_BOT_URL = os.environ["BOT_URL"]
 SYSTEM_PROMPT = prompts.BOT_CHAT_SYSTEM_PROMPT
 
 
 def request_chat(query, sender_id, multiturn=True):
+    settings = get_app_settings()
+    models = get_model_settings()
     if multiturn:
         history = _redis_client.get(REDIS_KEY.format(sender_id))
         if history:
@@ -31,7 +32,7 @@ def request_chat(query, sender_id, multiturn=True):
     else:
         history = []
     headers = {
-        "Authorization": DOUBAO_API_KEY, 
+        "Authorization": settings.api_key, 
         "Content-Type": "application/json"
     }
     messages_header = [
@@ -43,13 +44,13 @@ def request_chat(query, sender_id, multiturn=True):
     messages = messages_header + history + messages_now
     logger.info(f'request message:{messages}')
     data = {
-        "model": "bot-20250227131955-snjfg",
+        "model": models.bot_chat_model,
         "messages": messages,
         "stream": True
     }
     try:
         response = requests.post(
-            DOUBAO_BOT_URL,
+            settings.bot_url,
             headers=headers,
             data=json.dumps(data),
             stream=True

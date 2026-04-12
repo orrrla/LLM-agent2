@@ -5,6 +5,7 @@ import copy
 import traceback
 import time
 import re
+from pathlib import Path
 import redis
 import requests
 from collections import OrderedDict
@@ -13,9 +14,13 @@ from flask import Flask, jsonify, make_response
 from flask_socketio import SocketIO, emit
 
 import prompts
+from config.runtime import get_app_settings
+from memory_module_v2.api import distill_session
+from service.session_manager import SessionManager
 from utils import logger
 from utils.redis_tool import RedisClient
 from client.arbitration import request_arbitration
+from client.deep_research import process_research, request_deep_research, should_use_deep_research
 from client.stream_chat import request_chat, process_chat
 from client.reject import request_reject
 from client.nlu import request_nlu
@@ -35,6 +40,7 @@ DISAMBIG_KEY = "voice:disambiguation:{}"
 DISAMBIG_TTL = 120
 redis_client = RedisClient() 
 thread_pool = ThreadPoolExecutor(max_workers=10)
+session_manager = SessionManager(get_app_settings().sessions_dir)
 
 
 @app.route("/health", methods=["GET"])
@@ -83,6 +89,25 @@ def send_msg(nlu_result, func, frame, seq, cost, status):
     )
 
 
+def persist_message(session_id, role, content, **metadata):
+    session_manager.save_message(
+        session_id,
+        role,
+        content or "",
+        metadata=metadata or None,
+    )
+
+
+def schedule_distill(session_id):
+    def _runner():
+        try:
+            distill_session(session_id)
+        except Exception as exc:
+            logger.warning(f"async distill failed: {exc}")
+
+    thread_pool.submit(_runner)
+
+
 def handle_chat(handler_bot, nlu_result, query, sender_id, begin):
 
     # 开始帧
@@ -108,6 +133,30 @@ def handle_chat(handler_bot, nlu_result, query, sender_id, begin):
     else:
         logger.info(f"Chat cost time: {time.time() - begin}")
         return False, full_answer
+
+
+def handle_research(handler_research, nlu_result, query, sender_id, begin):
+
+    seq = 1
+    nlu_result_begin = copy.deepcopy(nlu_result)
+    send_msg(nlu_result_begin, "CHAT", "", seq, time.time() - begin, status=0)
+
+    full_answer = ""
+    result = handler_research.result()
+    for value in process_research(result, query, sender_id):
+        nlu_result_chat = copy.deepcopy(nlu_result)
+        send_msg(nlu_result_chat, "CHAT", value, seq, time.time() - begin, status=1)
+        seq += 1
+        full_answer += value
+        logger.info(f"Research Frame:{seq},content:{value}")
+
+    if seq > 1:
+        send_msg(nlu_result_begin, "CHAT", "", seq, time.time() - begin, status=2)
+        logger.info(f"Research cost time: {time.time() - begin}")
+        return True, full_answer, result.get("mode", "research"), result.get("sources", [])
+
+    logger.info(f"Research cost time: {time.time() - begin}")
+    return False, full_answer, result.get("mode", "empty"), result.get("sources", [])
 
 
 def clear_disambiguation_state(sender_id):
@@ -188,6 +237,7 @@ def inference(req):
     enable_dm = json_info.get("enable_dm")
     sender_id = json_info.get("sender_id", "test")
     trace_id = json_info.get("trace_id", "123")
+    session_id = json_info.get("session_id") or sender_id
 
     nlu_template = {
         "query": query,
@@ -202,6 +252,14 @@ def inference(req):
         ori_query = query
         logger.session.trace_id = trace_id
         logger.info("Request Params: {}".format(json_info))
+        persist_message(
+            session_id,
+            "user",
+            ori_query,
+            trace_id=trace_id,
+            sender_id=sender_id,
+            query=ori_query,
+        )
 
         disamb_raw = redis_client.get(DISAMBIG_KEY.format(sender_id))
         forced_intent_id = None
@@ -233,6 +291,16 @@ def inference(req):
                     begin,
                     message=prompts.DISAMBIGUATION_RETRY_PROMPT
                 )
+                persist_message(
+                    session_id,
+                    "assistant",
+                    prompts.DISAMBIGUATION_RETRY_PROMPT,
+                    route="task",
+                    trace_id=trace_id,
+                    intent="候选确认",
+                    function="Disambiguation",
+                )
+                schedule_distill(session_id)
                 return
 
         last_info = redis_client.get(REDIS_KEY.format(sender_id))
@@ -244,22 +312,19 @@ def inference(req):
         if forced_intent_id and disamb_origin_query:
             query = disamb_origin_query
         else:
-            query = request_rewrite(query, last_answer, sender_id)
+            query = request_rewrite(query, last_answer, sender_id, session_id=session_id)
 
         # 调用nlu语义
-        handler_nlu = thread_pool.submit(request_nlu, query, trace_id, enable_dm, forced_intent_id)
+        handler_nlu = thread_pool.submit(request_nlu, query, trace_id, enable_dm, forced_intent_id, session_id)
 
         # 调用仲裁
-        handler_arbitration = thread_pool.submit(request_arbitration, ori_query, sender_id)
+        handler_arbitration = thread_pool.submit(request_arbitration, ori_query, sender_id, session_id)
 
         # 调拒识模型
         handler_reject = thread_pool.submit(request_reject, query, trace_id)
 
         # 调用相关性模型
         handler_correlation = thread_pool.submit(request_correlation, ori_query, sender_id)
-
-        # 调用百科闲聊
-        handler_bot = thread_pool.submit(request_chat, ori_query, sender_id)
 
         # 获取仲裁结果
         arbitration_result = handler_arbitration.result()
@@ -291,6 +356,19 @@ def inference(req):
                     ),
                     broadcast=False
                 )
+                persist_message(
+                    session_id,
+                    "assistant",
+                    nlu_result["nlg"],
+                    route="task",
+                    trace_id=trace_id,
+                    intent="候选确认",
+                    function="Disambiguation",
+                    query=query,
+                    rewritten_query=query,
+                    candidates=nlu_result.get("candidates", []),
+                )
+                schedule_distill(session_id)
                 return
             # 技能
             if nlu_result.get("function", "") not in ["Unknown"]:
@@ -304,9 +382,44 @@ def inference(req):
                     ),
                     broadcast=False
                 )
+                tool_response = nlu_result.get("tool")
+                if tool_response:
+                    persist_message(
+                        session_id,
+                        "tool",
+                        str(tool_response),
+                        route="task",
+                        trace_id=trace_id,
+                        intent=nlu_result.get("intent", ""),
+                        function=nlu_result.get("function", ""),
+                        slots=nlu_result.get("slots", {}),
+                    )
+                persist_message(
+                    session_id,
+                    "assistant",
+                    nlu_result.get("nlg", "") or prompts.DEFAULT_NLG,
+                    route="task",
+                    trace_id=trace_id,
+                    intent=nlu_result.get("intent", ""),
+                    function=nlu_result.get("function", ""),
+                    slots=nlu_result.get("slots", {}),
+                    query=ori_query,
+                    rewritten_query=query,
+                )
+                schedule_distill(session_id)
             else:
                 send_msg(nlu_result, "REJECT", prompts.DEFAULT_NLG, 1, time.time() - begin, status=-1)
                 logger.info(f"Query {query} has been rejected.")
+                persist_message(
+                    session_id,
+                    "assistant",
+                    prompts.DEFAULT_NLG,
+                    route="reject",
+                    trace_id=trace_id,
+                    query=ori_query,
+                    rewritten_query=query,
+                )
+                schedule_distill(session_id)
         else:
             # 拒识
             reject_result = handler_reject.result()
@@ -317,11 +430,66 @@ def inference(req):
             if reject_result == 0:
                 send_msg(nlu_template, "REJECT", "", 1, time.time() - begin, status=-1)
                 logger.info(f"Query {query} has been rejected.")
+                persist_message(
+                    session_id,
+                    "assistant",
+                    prompts.DEFAULT_NLG,
+                    route="reject",
+                    trace_id=trace_id,
+                    query=ori_query,
+                    rewritten_query=query,
+                )
+                schedule_distill(session_id)
             else:
-                # 百科闲聊兜底
-                is_hit_chat, full_answer = handle_chat(handler_bot, nlu_template, ori_query, sender_id, begin)
-                if is_hit_chat:
-                    redis_client.set(REDIS_KEY.format(sender_id), f"CHAT#{query}#{reject_result}#{full_answer}", ex=TTL)
+                if should_use_deep_research(ori_query, sender_id, session_id=session_id):
+                    handler_research = thread_pool.submit(request_deep_research, ori_query, sender_id, session_id)
+                    is_hit_chat, full_answer, response_mode, sources = handle_research(
+                        handler_research, nlu_template, ori_query, sender_id, begin
+                    )
+                    if is_hit_chat:
+                        redis_client.set(REDIS_KEY.format(sender_id), f"CHAT#{query}#{reject_result}#{full_answer}", ex=TTL)
+                        persist_message(
+                            session_id,
+                            "assistant",
+                            full_answer,
+                            route=response_mode,
+                            trace_id=trace_id,
+                            query=ori_query,
+                            rewritten_query=query,
+                            sources=sources,
+                        )
+                        schedule_distill(session_id)
+                    else:
+                        handler_bot = thread_pool.submit(request_chat, ori_query, sender_id)
+                        is_hit_chat, full_answer = handle_chat(handler_bot, nlu_template, ori_query, sender_id, begin)
+                        if is_hit_chat:
+                            redis_client.set(REDIS_KEY.format(sender_id), f"CHAT#{query}#{reject_result}#{full_answer}", ex=TTL)
+                            persist_message(
+                                session_id,
+                                "assistant",
+                                full_answer,
+                                route="chat",
+                                trace_id=trace_id,
+                                query=ori_query,
+                                rewritten_query=query,
+                            )
+                            schedule_distill(session_id)
+                else:
+                    # 百科闲聊兜底
+                    handler_bot = thread_pool.submit(request_chat, ori_query, sender_id)
+                    is_hit_chat, full_answer = handle_chat(handler_bot, nlu_template, ori_query, sender_id, begin)
+                    if is_hit_chat:
+                        redis_client.set(REDIS_KEY.format(sender_id), f"CHAT#{query}#{reject_result}#{full_answer}", ex=TTL)
+                        persist_message(
+                            session_id,
+                            "assistant",
+                            full_answer,
+                            route="chat",
+                            trace_id=trace_id,
+                            query=ori_query,
+                            rewritten_query=query,
+                        )
+                        schedule_distill(session_id)
 
     except Exception as e:
         logger.error(
@@ -329,6 +497,15 @@ def inference(req):
         logger.error('{}'.format(e))
         traceback.print_exc()
         send_msg(nlu_template, "REJECT", "", 1, time.time() - begin, status=-1)
+        persist_message(
+            session_id,
+            "assistant",
+            prompts.DEFAULT_NLG,
+            route="error",
+            trace_id=trace_id,
+            query=query,
+        )
+        schedule_distill(session_id)
 
 if __name__ == "__main__":
     socketio.run(

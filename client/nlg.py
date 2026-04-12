@@ -5,31 +5,32 @@ import time
 import os
 from typing import Any
 import prompts
+from config.runtime import get_app_settings, get_model_settings
 from utils import logger
 
 
 TIMEOUT = 10.0
-DOUBAO_API_KEY = os.environ["API_KEY"]
-DOUBAO_URL = os.environ["BASE_URL"]
 NLG_PROMPT = prompts.NLG_PROMPT
 
 
 def request_nlg(query, tool_response):
     try:
+        settings = get_app_settings()
+        models = get_model_settings()
         headers = {
             "Content-Type": "application/json",
-            "Authorization": DOUBAO_API_KEY
+            "Authorization": settings.api_key
         }
         messages = [
             {"role": "user", "content": NLG_PROMPT.format(query, tool_response)}
         ]
 
         body = dict(
-            model="ep-20241203180921-h2kgz",
+            model=models.nlg_model,
             messages=messages,
         )
         response = requests.post(
-            DOUBAO_URL,
+            settings.base_url,
             headers=headers,
             json=body,
             timeout=TIMEOUT

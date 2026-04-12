@@ -4,22 +4,25 @@ import json
 import re
 import requests
 import prompts
+from config.runtime import get_app_settings, get_model_settings
+from memory_module_v2.api import build_memory_context
 from utils import logger
 from utils.redis_tool import RedisClient
 
 
 TTL = 40
 MAX_HISTORY = 6
-DOUBAO_API_KEY = os.environ["API_KEY"]
-DOUBAO_URL = os.environ["BASE_URL"]
 REDIS_KEY = "voice:rewrite_history:{}"
 _redis_client = RedisClient() 
 
 
-def request_rewrite(query, last_answer, sender_id):
+def request_rewrite(query, last_answer, sender_id, session_id=None):
+    settings = get_app_settings()
+    models = get_model_settings()
+    session_id = session_id or sender_id
 
     headers = {
-        "Authorization": DOUBAO_API_KEY,
+        "Authorization": settings.api_key,
         "Content-Type": "application/json"
     }
     history = _redis_client.get(REDIS_KEY.format(sender_id))
@@ -35,26 +38,22 @@ def request_rewrite(query, last_answer, sender_id):
     messages_header = [
         {"role": "system", "content": prompts.REWRITE_SYSTEM_PROMPT}
     ]
-    if not history:
+    memory_context = build_memory_context(query, session_id)
+    if not history and not memory_context:
         result = "否"
     else:
-        split_history = [history[i:i+2] for i in range(0, len(history), 2)]
+        split_history = [history[i:i+2] for i in range(0, len(history), 2)] if history else []
         history_msgs = []
-        for index, item in enumerate(split_history):
-            if index == len(split_history) - 1:
-                if item[1]["content"]:
-                    msg = "A：{}\nB：{}".format(item[0]["content"], item[1]["content"])
-                else:
-                    msg = "A：{}".format(item[0]["content"])
+        for item in split_history:
+            if len(item) > 1 and item[1]["content"]:
+                msg = "A：{}\nB：{}".format(item[0]["content"], item[1]["content"])
             else:
-                if item[1]["content"]:
-                    msg = "A：{}\nB：{}".format(item[0]["content"], item[1]["content"])
-                else:
-                    msg = "A：{}".format(item[0]["content"])
+                msg = "A：{}".format(item[0]["content"])
             history_msgs.append(msg)
-        history_msgs = "\n".join(history_msgs)
-
-        prompt = "#对话历史#\n{}\nA：{}\n".format(history_msgs, query)
+        prompt = "#对话历史#\n{}\n".format("\n".join(history_msgs)) if history_msgs else ""
+        if memory_context:
+            prompt += "#长期记忆#\n{}\n".format(memory_context)
+        prompt += "A：{}\n".format(query)
         logger.info(f"对话历史：{prompt}")
         messages_now = [
             {"role": "user", "content": prompt}
@@ -62,14 +61,14 @@ def request_rewrite(query, last_answer, sender_id):
         messages = messages_header + messages_now
 
         data = {
-            "model": "ep-20250206092527-ms2qn",
+            "model": models.rewrite_model,
             "messages": messages,
             "temperature": 0.001,
             "top_p": 0,
         }
 
         response = requests.post(
-            DOUBAO_URL,
+            settings.base_url,
             headers=headers,
             data=json.dumps(data),
         )

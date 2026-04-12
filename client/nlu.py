@@ -10,7 +10,7 @@ from typing import List
 NLU_URL = os.environ["NLU_URL"]
 
 
-def request_nlu(query, trace_id, enable_dm=True, force_intent_id=None):
+def request_nlu(query, trace_id, enable_dm=True, force_intent_id=None, session_id=None):
     headers = {
         "Content-Type":"application/json"
     }
@@ -21,6 +21,8 @@ def request_nlu(query, trace_id, enable_dm=True, force_intent_id=None):
     }
     if force_intent_id:
         payload_dict["force_intent_id"] = str(force_intent_id)
+    if session_id:
+        payload_dict["session_id"] = session_id
     payload = json.dumps(payload_dict)
     try:
         response = requests.post(

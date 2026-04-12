@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 import redis
 
- 
+from config.runtime import get_redis_settings
+
+
 class RedisDBConfig:
-    HOST = '127.0.0.1'
-    PORT = 6379
-    DBID = 0
+    settings = get_redis_settings()
+    HOST = settings.host
+    PORT = settings.port
+    DBID = settings.db
  
 def operator_status(func):
     '''get operatoration status

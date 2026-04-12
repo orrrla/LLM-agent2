@@ -5,6 +5,7 @@ import time
 import os
 from typing import Any
 import prompts
+from config.runtime import get_app_settings, get_model_settings
 from utils import logger
 from utils.redis_tool import RedisClient
 
@@ -13,8 +14,6 @@ TIMEOUT = 2.0
 REDIS_KEY = "voice:last_service:{}"
 _redis_client = RedisClient() 
 
-DOUBAO_API_KEY = os.environ["API_KEY"]
-DOUBAO_URL = os.environ["BASE_URL"]
 CORRELATION_SYSTEM = prompts.CORRELATION_SYSTEM
 CORRELATION_PROMPT = prompts.CORRELATION_PROMPT
 
@@ -22,6 +21,8 @@ CORRELATION_PROMPT = prompts.CORRELATION_PROMPT
 
 def request_correlation(query, sender_id):
     try:
+        settings = get_app_settings()
+        models = get_model_settings()
         last = _redis_client.get(REDIS_KEY.format(sender_id))
         if not last:
             return "否"
@@ -35,7 +36,7 @@ def request_correlation(query, sender_id):
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": DOUBAO_API_KEY
+            "Authorization": settings.api_key
         }
         messages = [
             {"role": "system", "content": CORRELATION_SYSTEM},
@@ -43,12 +44,12 @@ def request_correlation(query, sender_id):
         ]
 
         body = dict(
-            model="ep-20241203180921-h2kgz",
+            model=models.correlation_model,
             messages=messages,
             temperature=0,
         )
         response = requests.post(
-            DOUBAO_URL,
+            settings.base_url,
             headers=headers,
             json=body,
             timeout=TIMEOUT

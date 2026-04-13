@@ -185,6 +185,97 @@ DEEP_RESEARCH_FALLBACK_PROMPT = """你现在无法完成完整联网 deep resear
 {}
 """
 
+PLANNER_GATE_PROMPT = """你是一个任务编排判断器。请判断用户输入是否需要进入通用 Planner。
+
+输出“是”的情况：
+1. 任务明显包含多个步骤、多个子目标、多个工具或带有先后顺序。
+2. 用户要求“先...再...”“顺便...”“同时...”“帮我规划...”。
+3. 用户任务需要混合使用任务执行、长期记忆、联网调研等多种能力。
+
+输出“否”的情况：
+1. 单一任务可由现有 NLU/DM/MCP 直接完成。
+2. 只是简单闲聊、简单百科或单步查询。
+3. 只有一个明确动作，没有复杂依赖。
+
+只输出一个字：是 或 否。
+
+用户输入：
+{}"""
+
+PLANNER_PLAN_PROMPT = """你是一个通用 Planner。请根据用户目标，把任务拆成最少必要步骤，并输出 JSON。
+
+可用 step_type 只有四种：
+1. task：调用现有任务链（NLU/DM/MCP）
+2. research：调用 deep research
+3. memory：调用长期记忆检索
+4. respond：基于前面观察结果生成最终回复
+
+要求：
+1. 步骤数量控制在 2 到 5 步。
+2. 简单任务不要过度拆分。
+3. 只有在确实需要历史信息时才用 memory。
+4. 只有在需要联网调研或外部事实时才用 research。
+5. 最后必须有一个 respond 步骤。
+
+返回格式：
+{
+  "thought": "简短说明",
+  "steps": [
+    {"step_id": "step1", "step_type": "task", "goal": "xxx", "query": "xxx"},
+    {"step_id": "step2", "step_type": "respond", "goal": "总结结果", "query": ""}
+  ]
+}
+
+用户问题：
+{}
+
+长期记忆上下文：
+{}"""
+
+PLANNER_REPLAN_PROMPT = """你是一个 reactive planner。你会根据当前计划执行结果决定下一步。
+
+请返回 JSON：
+{
+  "action": "continue | update | finalize",
+  "reason": "简短原因",
+  "steps": [
+    {"step_id": "stepX", "step_type": "task|research|memory|respond", "goal": "xxx", "query": "xxx"}
+  ]
+}
+
+规则：
+1. 如果当前剩余计划仍然合理，返回 continue。
+2. 如果观察结果表明需要改计划，返回 update，并给出新的剩余步骤。
+3. 如果已经足够回答用户，返回 finalize。
+4. 不要重复已经成功执行过的步骤。
+
+原始用户问题：
+{}
+
+当前计划：
+{}
+
+执行观察：
+{}"""
+
+PLANNER_FINAL_PROMPT = """你是一个通用 Planner 的最终回答器。请基于执行步骤和观察结果，生成面向用户的中文回复。
+
+要求：
+1. 先给最终结论。
+2. 如果执行了任务工具，明确说明完成了什么。
+3. 如果使用了联网 research，可在最后列出来源。
+4. 如果存在不确定性，要明确说明。
+5. 不要暴露内部 chain-of-thought，只总结结果。
+
+用户问题：
+{}
+
+执行步骤：
+{}
+
+观察结果：
+{}"""
+
 NLU_SYSTEM_PROMPT = "今年是2025年。你需要根据输入去匹配最合适的function。如果输入里未指明需要操作的部件，请不要匹配到任何对部件进行操作的函数，部件包括但不限于空调、系统设置、车窗等。请必须匹配到Unknown函数。比如，将”打开这个“匹配到Unknown。请记住解锁和打开意思相近。"
 
 DEFAULT_NLG = "抱歉，这个问题我还在学习中"

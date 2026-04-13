@@ -1,13 +1,13 @@
 # LLM-MCP 多轮任务型对话 Agent
 
-> 一个面向车载场景的多轮任务型对话 Agent，基于 `LLM + BERT NLU + MCP + Redis + 长期记忆 + Deep Research` 组合实现，支持任务执行、闲聊兜底、长期记忆注入、意图消歧和轻量联网调研。
+> 一个面向车载场景的多轮任务型对话 Agent，基于 `LLM + BERT NLU + MCP + Redis + 长期记忆 + Deep Research + Planner` 组合实现，支持任务执行、闲聊兜底、长期记忆注入、意图消歧、轻量联网调研与复杂任务规划。
 
 ## 目录
 
 - [项目简介](#项目简介)
 - [核心能力](#核心能力)
 - [系统架构](#系统架构)
-- [Deep Research 与长期记忆](#deep-research-与长期记忆)
+- [Planner、Deep Research 与长期记忆](#plannerdeep-research-与长期记忆)
 - [技术栈](#技术栈)
 - [快速开始](#快速开始)
 - [关键配置](#关键配置)
@@ -16,16 +16,18 @@
 
 ## 项目简介
 
-本项目最初是一个以车载语音任务为中心的对话 Agent，当前版本在原有 `微服务 + Function Calling + MCP` 架构基础上，继续补入了两条重要能力：
+本项目最初是一个以车载语音任务为中心的对话 Agent，当前版本在原有 `微服务 + Function Calling + MCP` 架构基础上，继续补入了三条重要能力：
 
 - **长期记忆链**：把对话统一落盘为本地会话事实源，增量蒸馏为结构化对象，并通过 `pgvector + BM25` 做混合检索，为改写、仲裁和 NLU 提供跨轮上下文。
 - **Deep Research 最小链路**：在 `chat fallback` 路径中增加“优先联网、失败退化到长期记忆/普通闲聊”的研究型回答能力。
+- **分层式 Planner**：为复杂请求增加 `Plan-Act-Observe-Replan` 规划层，按需编排任务执行、联网调研、长期记忆检索和最终总结。
 
 因此，项目现在同时覆盖三类能力：
 
 - **任务型对话**：天气、地图、音乐等 MCP/DM 驱动的车载任务
 - **多轮会话**：Redis 短期上下文 + 本地会话持久化 + 长期记忆检索
 - **开放域兜底**：普通闲聊、百科问答，以及触发式 deep research
+- **复杂请求规划**：多步骤任务拆解、外部资料调研、记忆检索与统一总结
 
 ## 核心能力
 
@@ -34,6 +36,8 @@
 - **MCP 工具调用**：通过标准 MCP 协议访问高德地图、QQ 音乐等能力
 - **长期记忆 v2**：会话 JSON 落盘、exchange 切分、结构化蒸馏、混合检索、上下文注入
 - **Deep Research 最小链路**：Tavily 搜索 + URL 抓取 + LLM 汇总，失败时退回长期记忆/普通 Bot
+- **通用 Planner**：基于 `task / research / memory / respond` 四类步骤做受控编排，并支持 `replan`
+- **Gemini 兼容调用**：`planner` 与 `deep research` 可通过统一 LLM 客户端切换到 Gemini REST
 - **流式输出**：任务答复、闲聊和 research 都复用统一 `SocketIO` 帧协议
 - **可审计性**：对话保存在 `memory_store/sessions/`，可回放、可蒸馏、可检索
 
@@ -47,9 +51,21 @@
     │
     ├── rewrite.py        → Query 改写（短期历史 + 长期记忆）
     ├── arbitration.py    → 路由仲裁（task / faq / chat）
+    ├── planner gate      → 复杂任务判定（keyword / optional LLM gate）
     ├── reject.py         → 拒识模型
     ├── correlation.py    → 多轮相关性判断
     └── nlu.py            → NLU 微服务
+
+planner 路径：
+    start.py
+      → should_use_planner()
+      → planner/engine.py
+          → plan(task / research / memory / respond)
+          → task     → request_nlu() / DM / MCP
+          → research → deep_research.py
+          → memory   → memory_module_v2
+          → replan   → observation 驱动动态调整
+          → respond  → 汇总最终回答
 
 task 路径：
     start.py
@@ -79,7 +95,23 @@ chat / faq fallback 路径：
       → rewrite / arbitration / chatnlu_infer 注入
 ```
 
-## Deep Research 与长期记忆
+## Planner、Deep Research 与长期记忆
+
+### Planner
+
+当前版本的 planner 不是替换原有任务链，而是做一层“复杂任务编排器”：
+
+- 简单任务仍然走既有 `rewrite -> arbitration -> NLU -> DM -> MCP` 链路
+- 复杂请求由 `should_use_planner()` 判定后进入 `planner/engine.py`
+- Planner 先生成结构化步骤，再按 `task / research / memory / respond` 执行
+- 每一步会产出 observation，必要时触发 `replan`
+- `task` 复用现有 NLU/DM/MCP，`research` 复用 Deep Research，`memory` 复用长期记忆检索
+
+适合的 query 示例：
+
+- “先帮我查一下明天杭州天气，再推荐适合开车听的歌”
+- “帮我调研一下某车型，再总结给我”
+- “结合我之前的偏好，帮我规划一个执行方案”
 
 ### Deep Research 最小链路
 
@@ -118,13 +150,14 @@ chat / faq fallback 路径：
 |------|------|
 | Web 框架 | Flask + Flask-SocketIO |
 | 微服务框架 | FastAPI + Uvicorn |
-| LLM 接入 | 豆包 Chat / Bot API |
+| LLM 接入 | OpenAI-compatible Chat API + Gemini REST（当前用于 planner / deep research） |
 | NLU 模型 | BERT / BERT-tiny（PyTorch + Transformers） |
 | MCP 协议 | `mcp==1.7.0`，FastMCP 工具服务 |
 | 外部 API | 高德地图、QQ音乐、Tavily |
 | 短期状态 | Redis |
 | 长期记忆 | 本地 JSON、`psycopg`、`pgvector`、`rank-bm25` |
 | 网页抓取 | `httpx` + `html2text` |
+| Planner | JSON 计划、`task/research/memory/respond`、Plan-Act-Observe-Replan |
 | 并发 | `ThreadPoolExecutor` |
 
 ## 快速开始
@@ -135,11 +168,19 @@ chat / faq fallback 路径：
 - Redis
 - PostgreSQL + `pgvector`（启用长期记忆时）
 - CUDA（可选，用于 BERT 推理）
+- macOS 可直接使用精简依赖文件，无需安装 CUDA 相关包
 
 ### 安装依赖
 
 ```bash
 pip install -r requirements.txt
+```
+
+macOS / conda `agent` 环境推荐：
+
+```bash
+conda activate agent
+pip install -r requirements-macos-agent.txt
 ```
 
 ### 基础环境变量
@@ -155,6 +196,14 @@ export AMAP_MAPS_API_KEY="your_amap_api_key"
 export REJECT_URL="http://127.0.0.1:8007/reject-server/v1"
 export INTENT_URL="http://127.0.0.1:8008/intent-server/v1"
 export NLU_URL="http://127.0.0.1:8009/chatnlu-server/v1"
+```
+
+如果你希望 planner / deep research 直接调用 Gemini，可额外配置：
+
+```bash
+export GEMINI_API_KEY="your_gemini_api_key"
+export PLANNER_MODEL="gemini-2.0-flash"
+export DEEP_RESEARCH_MODEL="gemini-2.0-flash"
 ```
 
 ### 启用长期记忆
@@ -176,6 +225,17 @@ export TAVILY_API_KEY="tvly-xxxx"
 export DEEP_RESEARCH_MODEL="ep-xxxx"
 export DEEP_RESEARCH_MAX_RESULTS="5"
 export DEEP_RESEARCH_FETCH_TOP_N="3"
+```
+
+### 启用 Planner
+
+```bash
+export PLANNER_ENABLED="true"
+export PLANNER_MODEL="ep-xxxx"
+export PLANNER_GATE_MODEL=""
+export PLANNER_REPLAN_MODEL="ep-xxxx"
+export PLANNER_MAX_STEPS="5"
+export PLANNER_MAX_REPLANS="2"
 ```
 
 ### 启动服务
@@ -219,6 +279,7 @@ python dialog.py
 | `API_KEY` | 豆包通用补全接口密钥 |
 | `BASE_URL` | 豆包补全接口 |
 | `BOT_URL` | 豆包 Bot 接口 |
+| `GEMINI_API_KEY` | Gemini REST 密钥；当模型名以 `gemini` 开头时由统一 LLM 客户端使用 |
 | `REWRITE_MODEL` | 改写模型 |
 | `ARBITRATION_MODEL` | 仲裁模型 |
 | `NLU_FC_MODEL` | Function Calling 模型 |
@@ -226,6 +287,9 @@ python dialog.py
 | `BOT_CHAT_MODEL` | 普通闲聊 Bot 模型 |
 | `DEEP_RESEARCH_MODEL` | Deep research 汇总模型 |
 | `DEEP_RESEARCH_TRIGGER_MODEL` | 可选的 deep research 触发判断模型 |
+| `PLANNER_MODEL` | Planner 初始规划 / 最终总结模型 |
+| `PLANNER_GATE_MODEL` | 可选的 planner 入口判定模型 |
+| `PLANNER_REPLAN_MODEL` | Planner 重规划模型 |
 
 ### Redis 与微服务
 
@@ -258,6 +322,15 @@ python dialog.py
 | `DEEP_RESEARCH_MAX_RESULTS` | 搜索结果数量 |
 | `DEEP_RESEARCH_FETCH_TOP_N` | 抓取正文的 URL 数量 |
 
+### Planner
+
+| 配置项 | 说明 |
+|--------|------|
+| `PLANNER_ENABLED` | 是否启用 planner |
+| `PLANNER_TIMEOUT` | planner 单轮 LLM 超时 |
+| `PLANNER_MAX_STEPS` | 最大执行步骤数 |
+| `PLANNER_MAX_REPLANS` | 最大重规划次数 |
+
 ## 项目结构
 
 ```text
@@ -266,6 +339,7 @@ LLM-mcp多轮任务型对话agent/
 ├── prompts.py
 ├── dialog.py
 ├── requirements.txt
+├── requirements-macos-agent.txt
 ├── client/
 │   ├── arbitration.py
 │   ├── correlation.py
@@ -302,10 +376,16 @@ LLM-mcp多轮任务型对话agent/
 │   └── models.py
 ├── memory_store/
 │   └── sessions/
+├── planner/
+│   ├── __init__.py
+│   └── engine.py
 ├── service/
 │   └── session_manager.py
 ├── train/
 ├── utils/
+│   ├── llm_client.py
+│   ├── logger.py
+│   └── redis_tool.py
 └── test/
 ```
 
@@ -327,5 +407,6 @@ python e2e_score.py
 ## 当前限制
 
 - `faq` 仍然和 `chat fallback` 共用同一条兜底路径，尚未拆成独立 research/faq 服务。
-- deep research 当前是“最小链路”，不是通用 Planner，不会做复杂多轮网页代理操作。
+- deep research 当前仍是“最小链路”，以搜索、抓取和总结为主，不会做复杂浏览器代理操作。
+- planner 当前是分层式轻量编排器，工具类型固定为 `task / research / memory / respond`，不等同于通用 autonomous agent 框架。
 - 长期记忆依赖 Postgres 和 embedding 接口，未配置时会自动退化，不影响主任务链路。

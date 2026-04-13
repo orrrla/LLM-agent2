@@ -54,6 +54,9 @@ class ModelSettings:
     correlation_model: str = _env("CORRELATION_MODEL", "ep-20241203180921-h2kgz")
     nlu_fc_model: str = _env("NLU_FC_MODEL", "ep-20250106153928-kh8t7")
     bot_chat_model: str = _env("BOT_CHAT_MODEL", "bot-20250227131955-snjfg")
+    planner_model: str = _env("PLANNER_MODEL", _env("NLG_MODEL", "ep-20241203180921-h2kgz"))
+    planner_gate_model: str = _env("PLANNER_GATE_MODEL", "")
+    planner_replan_model: str = _env("PLANNER_REPLAN_MODEL", _env("PLANNER_MODEL", _env("NLG_MODEL", "ep-20241203180921-h2kgz")))
     deep_research_model: str = _env("DEEP_RESEARCH_MODEL", _env("NLG_MODEL", "ep-20241203180921-h2kgz"))
     deep_research_trigger_model: str = _env("DEEP_RESEARCH_TRIGGER_MODEL", "")
     distill_model: str = _env("DISTILL_MODEL", _env("NLU_FC_MODEL", "ep-20250106153928-kh8t7"))
@@ -65,6 +68,7 @@ class AppSettings:
     api_key: str = _env("API_KEY")
     base_url: str = _env("BASE_URL")
     bot_url: str = _env("BOT_URL")
+    gemini_api_key: str = _env("GEMINI_API_KEY")
     reject_url: str = _env("REJECT_URL")
     intent_url: str = _env("INTENT_URL")
     nlu_url: str = _env("NLU_URL")
@@ -97,6 +101,10 @@ class AppSettings:
     deep_research_max_results: int = _env_int("DEEP_RESEARCH_MAX_RESULTS", 5)
     deep_research_fetch_top_n: int = _env_int("DEEP_RESEARCH_FETCH_TOP_N", 3)
     tavily_api_key: str = _env("TAVILY_API_KEY")
+    planner_enabled: bool = _env_bool("PLANNER_ENABLED", False)
+    planner_timeout: float = _env_float("PLANNER_TIMEOUT", 25.0)
+    planner_max_steps: int = _env_int("PLANNER_MAX_STEPS", 5)
+    planner_max_replans: int = _env_int("PLANNER_MAX_REPLANS", 2)
 
     @property
     def postgres_resolved_dsn(self) -> str:

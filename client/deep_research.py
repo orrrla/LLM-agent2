@@ -17,6 +17,7 @@ import prompts
 from config.runtime import get_app_settings, get_model_settings
 from memory_module_v2.api import build_memory_context
 from utils import logger
+from utils.llm_client import call_text_model
 from utils.redis_tool import RedisClient
 
 
@@ -228,31 +229,13 @@ def _search_web(query: str) -> list[dict[str, Any]]:
 
 
 def _call_llm(model: str, user_prompt: str, *, max_tokens: int = 1200) -> str:
-    if not model:
-        return ""
-    settings = get_app_settings()
-    headers = {
-        "Authorization": settings.api_key,
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": user_prompt}],
-        "temperature": 0.2,
-        "max_tokens": max_tokens,
-    }
-    try:
-        response = requests.post(
-            settings.base_url,
-            headers=headers,
-            data=json.dumps(payload),
-            timeout=settings.deep_research_timeout,
-        )
-        response.raise_for_status()
-        return str(response.json()["choices"][0]["message"]["content"] or "")
-    except Exception as exc:
-        logger.warning(f"deep research llm failed: {exc}")
-        return ""
+    return call_text_model(
+        model,
+        user_prompt,
+        max_tokens=max_tokens,
+        timeout=get_app_settings().deep_research_timeout,
+        temperature=0.2,
+    )
 
 
 def _manual_summary(query_time: str, search_results: list[dict[str, Any]], fetched_docs: list[dict[str, Any]]) -> str:

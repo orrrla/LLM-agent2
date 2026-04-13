@@ -26,6 +26,7 @@ from client.reject import request_reject
 from client.nlu import request_nlu
 from client.rewrite import request_rewrite
 from client.correlation import request_correlation
+from planner import process_planner_result, run_planner, should_use_planner
 
 
 socketio = SocketIO(cors_allowed_origins='*', async_mode='threading')
@@ -157,6 +158,30 @@ def handle_research(handler_research, nlu_result, query, sender_id, begin):
 
     logger.info(f"Research cost time: {time.time() - begin}")
     return False, full_answer, result.get("mode", "empty"), result.get("sources", [])
+
+
+def handle_planner(handler_planner, nlu_result, query, begin):
+
+    seq = 1
+    nlu_result_begin = copy.deepcopy(nlu_result)
+    send_msg(nlu_result_begin, "CHAT", "", seq, time.time() - begin, status=0)
+
+    full_answer = ""
+    result = handler_planner.result()
+    for value in process_planner_result(result, query):
+        nlu_result_chat = copy.deepcopy(nlu_result)
+        send_msg(nlu_result_chat, "CHAT", value, seq, time.time() - begin, status=1)
+        seq += 1
+        full_answer += value
+        logger.info(f"Planner Frame:{seq},content:{value}")
+
+    if seq > 1:
+        send_msg(nlu_result_begin, "CHAT", "", seq, time.time() - begin, status=2)
+        logger.info(f"Planner cost time: {time.time() - begin}")
+        return True, full_answer, result.get("mode", "planner"), result.get("steps", []), result.get("sources", [])
+
+    logger.info(f"Planner cost time: {time.time() - begin}")
+    return False, full_answer, result.get("mode", "planner_empty"), result.get("steps", []), result.get("sources", [])
 
 
 def clear_disambiguation_state(sender_id):
@@ -313,6 +338,37 @@ def inference(req):
             query = disamb_origin_query
         else:
             query = request_rewrite(query, last_answer, sender_id, session_id=session_id)
+
+        if not forced_intent_id and should_use_planner(query, session_id=session_id):
+            handler_planner = thread_pool.submit(run_planner, query, sender_id, session_id, trace_id)
+            is_hit_planner, full_answer, response_mode, planner_steps, sources = handle_planner(
+                handler_planner, nlu_template, ori_query, begin
+            )
+            if is_hit_planner:
+                persist_message(
+                    session_id,
+                    "assistant",
+                    full_answer,
+                    route=response_mode,
+                    trace_id=trace_id,
+                    query=ori_query,
+                    rewritten_query=query,
+                    planner_steps=planner_steps,
+                    sources=sources,
+                )
+                schedule_distill(session_id)
+            else:
+                persist_message(
+                    session_id,
+                    "assistant",
+                    "规划执行未产生有效结果，请换一种说法或拆分任务。",
+                    route="planner_empty",
+                    trace_id=trace_id,
+                    query=ori_query,
+                    rewritten_query=query,
+                )
+                schedule_distill(session_id)
+            return
 
         # 调用nlu语义
         handler_nlu = thread_pool.submit(request_nlu, query, trace_id, enable_dm, forced_intent_id, session_id)

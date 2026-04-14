@@ -81,9 +81,12 @@ chat / faq fallback 路径：
     start.py
       → should_use_deep_research()
       → deep_research.py
-          → Tavily Search
-          → fetch_url_text()
-          → LLM 汇总
+          → research_engine（迭代式 research loop）
+              → plan（生成子问题/检索策略）
+              → Tavily Search（多轮）
+              → fetch_url_text()（多轮抓取）
+              → critique（判断证据缺口/冲突并调整 query）
+              → finalize（LLM 汇总 + 来源）
           → 失败时回退 memory_module_v2 / stream_chat.py
 
 长期记忆路径：
@@ -113,23 +116,28 @@ chat / faq fallback 路径：
 - “帮我调研一下某车型，再总结给我”
 - “结合我之前的偏好，帮我规划一个执行方案”
 
-### Deep Research 最小链路
+### Deep Research（迭代式 research loop）
 
-当前版本的 deep research 不在任务域里做 MCP 编排，而是先挂在 `chat fallback` 路径，用来处理这类请求：
+当前版本的 deep research 不在任务域里做 MCP 编排，而是挂在 `chat fallback` 路径，主要用于处理这类请求：
 
 - “帮我调研一下……”
 - “对比一下 A 和 B，给出处”
 - “帮我查官网 / 最新信息”
 - “总结一下这个方向的资料”
 
-执行顺序：
+执行顺序（简化）：
 
-1. 判断当前 query 是否值得进入 deep research
-2. 使用 Tavily 做联网搜索
-3. 抓取 1 到 3 个候选 URL 正文
-4. 调用 LLM 汇总为中文研究结论
-5. 如果联网失败或证据不足，退回长期记忆
-6. 如果长期记忆也不可用，再退回普通 Bot 闲聊
+1. 判断当前 query 是否值得进入 deep research（关键词 + 可选 LLM gate）
+2. 生成 research plan（子问题 + 初始检索 queries + 停止条件）
+3. 多轮执行：Tavily 搜索 → 抓取候选 URL → critique（判断缺口/冲突，必要时给出新 query）
+4. 满足停止条件后 finalize：LLM 生成研究结论，并附来源
+5. 如果联网或总结失败：回退到 manual summary（返回候选资料与来源）
+6. 如果联网失败或证据不足：回退到长期记忆；仍不可用再回退普通闲聊
+
+实现位置：
+
+- 兼容入口仍为 `client/deep_research.py` 的 `request_deep_research()`
+- 迭代引擎位于 `client/research_engine.py`（plan / critique / finalize）
 
 ### 长期记忆
 

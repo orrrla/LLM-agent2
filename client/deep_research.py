@@ -19,6 +19,7 @@ from memory_module_v2.api import build_memory_context
 from utils import logger
 from utils.llm_client import call_text_model
 from utils.redis_tool import RedisClient
+from client.research_engine import run_iterative_research
 
 
 MAX_HIS = 6
@@ -73,90 +74,16 @@ def should_use_deep_research(query: str, sender_id: str, session_id: str | None 
 def request_deep_research(query: str, sender_id: str, session_id: str | None = None) -> dict[str, Any]:
     session_id = session_id or sender_id
     settings = get_app_settings()
-    query_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    search_results = _search_web(query)
-    if search_results:
-        top_results = search_results[: settings.deep_research_fetch_top_n]
-        fetched_docs = []
-        for item in top_results:
-            url = str(item.get("url", "")).strip()
-            if not url:
-                continue
-            content = fetch_url_text(url)
-            if content:
-                fetched_docs.append(
-                    {
-                        "title": item.get("title", ""),
-                        "url": url,
-                        "content": content[:4000],
-                        "published_date": item.get("published_date", ""),
-                        "score": item.get("score", 0),
-                    }
-                )
-
-        research_payload = {
-            "query_time": query_time,
-            "search_results": search_results[: settings.deep_research_max_results],
-            "fetched_docs": fetched_docs,
-        }
-        summary = _call_llm(
-            get_model_settings().deep_research_model,
-            prompts.DEEP_RESEARCH_SUMMARY_PROMPT.format(
-                query,
-                json.dumps(research_payload, ensure_ascii=False, indent=2),
-            ),
-            max_tokens=1800,
-        )
-        if summary:
-            return {
-                "mode": "research",
-                "answer": summary.strip(),
-                "sources": [
-                    {
-                        "title": item.get("title", ""),
-                        "url": item.get("url", ""),
-                    }
-                    for item in search_results[: settings.deep_research_fetch_top_n]
-                ],
-                "query_time": query_time,
-            }
-
-        manual_summary = _manual_summary(query_time, search_results, fetched_docs)
-        if manual_summary:
-            return {
-                "mode": "research",
-                "answer": manual_summary,
-                "sources": [
-                    {
-                        "title": item.get("title", ""),
-                        "url": item.get("url", ""),
-                    }
-                    for item in search_results[: settings.deep_research_fetch_top_n]
-                ],
-                "query_time": query_time,
-            }
-
-    memory_context = build_memory_context(query, session_id)
-    if memory_context:
-        fallback_answer = _call_llm(
-            get_model_settings().deep_research_model,
-            prompts.DEEP_RESEARCH_FALLBACK_PROMPT.format(query, memory_context),
-            max_tokens=800,
-        )
-        return {
-            "mode": "memory",
-            "answer": (fallback_answer or memory_context).strip(),
-            "sources": [],
-            "query_time": query_time,
-        }
-
-    return {
-        "mode": "empty",
-        "answer": "",
-        "sources": [],
-        "query_time": query_time,
-    }
+    return run_iterative_research(
+        query,
+        sender_id=sender_id,
+        session_id=session_id,
+        max_rounds=3,
+        max_queries=6,
+        max_docs_total=max(settings.deep_research_fetch_top_n, 3) * 2,
+        fetch_top_n_per_round=max(1, min(2, settings.deep_research_fetch_top_n)),
+        timeout=settings.deep_research_timeout,
+    )
 
 
 def process_research(result: dict[str, Any], query: str, sender_id: str):

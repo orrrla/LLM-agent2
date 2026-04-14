@@ -171,6 +171,10 @@ DEEP_RESEARCH_SUMMARY_PROMPT = """你是一个 deep research 助手。你会基�
 {}
 """
 
+DEEP_RESEARCH_PLAN_PROMPT = """你是一个 research planner。请把用户问题转成一个小型研究计划，并输出 JSON（只输出 JSON，不要解释）。\n\n要求：\n1. goal：一句话研究目标\n2. subquestions：2~5个子问题（尽量覆盖：定义/对比/结论/风险/最新进展）\n3. initial_queries：3~6个初始搜索查询词（中英文都可）\n4. stop_criteria：2~4条停止条件\n\n返回格式示例：\n{{\n  \"goal\": \"...\",\n  \"subquestions\": [\"...\"],\n  \"initial_queries\": [\"...\"],\n  \"stop_criteria\": [\"...\"\n  ]\n}}\n\n用户问题：\n{}"""
+DEEP_RESEARCH_CRITIQUE_PROMPT = """你是一个 research critic。你会根据当前证据判断是否需要继续搜索，并输出 JSON（只输出 JSON，不要解释）。\n\n规则：\n- 如果证据足以回答核心子问题，action=finalize\n- 如果仍有关键缺口/冲突/缺少权威来源，action=continue 并给出 new_queries\n- new_queries 控制在 1~4 条，尽量具体（加入站点/年份/关键实体）\n\n返回格式示例：\n{{\n  \"action\": \"continue\",\n  \"reason\": \"...\",\n  \"new_queries\": [\"...\"],\n  \"conflicts\": [\"...\"]\n}}\n\n用户问题：\n{}\n\n当前证据（JSON）：\n{}"""
+DEEP_RESEARCH_FINAL_PROMPT = """你是一个 deep research 助手。请基于证据 JSON 输出最终中文结论。\n\n要求：\n1. 先给“结论”（3~6行）\n2. 再给“依据”（至少2点，尽量引用证据里的来源标题）\n3. 再给“对比/要点”（如问题是对比类）\n4. 最后给“来源”（列出 title + url，最多10条）\n5. 如果信息冲突，要写清楚冲突点与可能原因\n6. 不要编造没有出现在证据里的事实\n\n用户问题：\n{}\n\n证据（JSON）：\n{}"""
+
 DEEP_RESEARCH_FALLBACK_PROMPT = """你现在无法完成完整联网 deep research，但可以基于已有长期记忆给出保守回答。
 
 要求：
@@ -218,13 +222,13 @@ PLANNER_PLAN_PROMPT = """你是一个通用 Planner。请根据用户目标，�
 5. 最后必须有一个 respond 步骤。
 
 返回格式：
-{
+{{
   "thought": "简短说明",
   "steps": [
-    {"step_id": "step1", "step_type": "task", "goal": "xxx", "query": "xxx"},
-    {"step_id": "step2", "step_type": "respond", "goal": "总结结果", "query": ""}
+    {{"step_id": "step1", "step_type": "task", "goal": "xxx", "query": "xxx"}},
+    {{"step_id": "step2", "step_type": "respond", "goal": "总结结果", "query": ""}}
   ]
-}
+}}
 
 用户问题：
 {}
@@ -235,13 +239,13 @@ PLANNER_PLAN_PROMPT = """你是一个通用 Planner。请根据用户目标，�
 PLANNER_REPLAN_PROMPT = """你是一个 reactive planner。你会根据当前计划执行结果决定下一步。
 
 请返回 JSON：
-{
+{{
   "action": "continue | update | finalize",
   "reason": "简短原因",
   "steps": [
-    {"step_id": "stepX", "step_type": "task|research|memory|respond", "goal": "xxx", "query": "xxx"}
+    {{"step_id": "stepX", "step_type": "task|research|memory|respond", "goal": "xxx", "query": "xxx"}}
   ]
-}
+}}
 
 规则：
 1. 如果当前剩余计划仍然合理，返回 continue。
